@@ -1,0 +1,353 @@
+<?php
+/**
+ * 摄影画廊页面
+ * 字段规则：
+ *   class     → 分类（风景/城市/人像/美食/动物），不填默认风景
+ *   location  → 拍摄地点，不填默认空
+ *   img       → 图片链接，不填则用正文第一张图
+ *
+ * @package sky
+ */
+if (!defined('__TYPECHO__')) exit;
+$this->need('header.php');
+
+// 相册分类 mid=5（对应 slug=photo, name=相册）
+define('__PHOTO_MID__', 5);
+
+$db = \Typecho\Db::get();
+
+// ==================== 查询照片文章 ====================
+$rows = $db->fetchAll(
+    $db->select('c.cid', 'c.title', 'c.created', 'c.text')
+       ->from('table.contents c')
+       ->join('table.relationships r', 'c.cid = r.cid', 'left')
+       ->where('c.type = ?', 'post')
+       ->where('c.status = ?', 'publish')
+       ->where('r.mid = ?', __PHOTO_MID__)
+       ->order('c.created', \Typecho\Db::SORT_DESC)
+);
+
+// ==================== 读取自定义字段 ====================
+$cids = array_column($rows, 'cid');
+$fieldsMap = [];
+if ($cids) {
+    $fieldRows = $db->fetchAll(
+        $db->select()->from('table.fields')
+           ->where('cid IN ('.implode(',', $cids).')')
+    );
+    foreach ($fieldRows as $f) {
+        $fieldsMap[$f['cid']][$f['name']] = $f['str_value'];
+    }
+}
+
+// ==================== 按 class 分类 ====================
+$targetNames = ['风景', '城市', '人像', '美食', '动物'];
+$emojis = ['风景'=>'🏔️','城市'=>'🌃','人像'=>'👤','美食'=>'🍜','动物'=>'🐱'];
+$buckets = array_fill_keys($targetNames, []);
+
+foreach ($rows as $p) {
+    $cid   = $p['cid'];
+    $f     = $fieldsMap[$cid] ?? [];
+    $class = isset($f['class']) && $f['class'] !== '' ? $f['class'] : '风景';
+    if (!isset($emojis[$class])) $class = '风景';
+    $location = $f['location'] ?? '';
+    $img      = $f['img'] ?? '';
+
+    if (!$img) {
+        $img = extractFirstImage($p['text']);
+    }
+
+    $buckets[$class][] = [
+        'cid'      => $cid,
+        'title'    => $p['title'],
+        'created'  => $p['created'],
+        'location' => $location,
+        'img'      => $img,
+    ];
+}
+
+// ==================== 统计 ====================
+$total  = 0;
+$counts = [];
+foreach ($targetNames as $n) {
+    $counts[$n] = count($buckets[$n]);
+    $total += $counts[$n];
+}
+
+function extractFirstImage($text) {
+    if (preg_match('/<img[^>]+src=["\']([^"\']+)["\'][^>]*>/i', $text, $m)) {
+        return $m[1];
+    }
+    return '';
+}
+?>
+
+<style>
+.photo-container { margin-top: 28px; }
+
+/* 筛选栏 */
+.photo-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 24px;
+}
+.photo-filter button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 7px 14px;
+    border: 1px solid #e0e0e0;
+    border-radius: 20px;
+    background: #fff;
+    color: #555;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.photo-filter button:hover { border-color: #333; color: #333; }
+.photo-filter button.active { background: #333; color: #fff; border-color: #333; }
+.photo-filter button .count {
+    background: rgba(255,255,255,0.3);
+    border-radius: 999px;
+    padding: 1px 6px;
+    font-size: 12px;
+}
+.photo-filter button:not(.active) .count { background: #f5f5f5; }
+
+/* 瀑布流网格 */
+.photo-gallery {
+    columns: 3 260px;
+    column-gap: 14px;
+}
+.photo-item {
+    break-inside: avoid;
+    margin-bottom: 14px;
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+    background: #f5f5f5;
+    position: relative;
+}
+.photo-item img {
+    width: 100%;
+    display: block;
+    transition: transform 0.35s;
+}
+.photo-item:hover img { transform: scale(1.04); }
+.photo-item .photo-caption {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    background: linear-gradient(transparent, rgba(0,0,0,0.65));
+    padding: 40px 12px 10px;
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+.photo-item:hover .photo-caption { opacity: 1; }
+.photo-caption-title { color: #fff; font-size: 13px; font-weight: 500; }
+.photo-caption-loc { color: rgba(255,255,255,0.8); font-size: 11px; margin-top: 2px; }
+
+/* 分类标签角标 */
+.photo-item .class-badge {
+    position: absolute;
+    top: 8px; left: 8px;
+    background: rgba(0,0,0,0.55);
+    color: #fff;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+}
+
+/* 空状态 */
+.photo-empty {
+    text-align: center;
+    padding: 60px 0;
+    color: #999;
+    font-size: 14px;
+}
+.photo-empty p { margin: 6px 0; }
+
+/* 灯箱 */
+.photo-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.9);
+    z-index: 9999;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+}
+.photo-modal.open { display: flex; }
+.photo-modal img {
+    max-width: 90vw;
+    max-height: 72vh;
+    object-fit: contain;
+    border-radius: 6px;
+}
+.photo-modal .m-info {
+    text-align: center;
+    color: #fff;
+    margin-top: 14px;
+    max-width: 600px;
+}
+.photo-modal .m-title { margin: 0 0 4px; font-size: 16px; }
+.photo-modal .m-meta { color: rgba(255,255,255,0.6); font-size: 12px; margin: 0; }
+.photo-modal .m-close {
+    position: absolute;
+    top: 14px; right: 18px;
+    color: #fff; font-size: 34px;
+    cursor: pointer; opacity: 0.7;
+    background: none; border: none; line-height: 1;
+}
+.photo-modal .m-close:hover { opacity: 1; }
+.photo-modal .m-nav {
+    position: absolute;
+    top: 50%; transform: translateY(-50%);
+    color: #fff; font-size: 42px;
+    cursor: pointer; opacity: 0.5;
+    background: none; border: none;
+    padding: 0 14px;
+    transition: opacity 0.2s;
+}
+.photo-modal .m-nav:hover { opacity: 1; }
+.photo-modal .m-prev { left: 6px; }
+.photo-modal .m-next { right: 6px; }
+
+@media (max-width: 600px) {
+    .photo-gallery { columns: 2 150px; }
+    .photo-modal .m-prev { left: 0; }
+    .photo-modal .m-next { right: 0; }
+}
+</style>
+
+<div class="col-8" id="main">
+    <div class="photo-container">
+
+        <?php if ($total): ?>
+        <!-- 分类筛选 -->
+        <div class="photo-filter" id="photoFilter">
+            <button class="active" data-class="全部">📷 全部 <span class="count"><?php echo $total; ?></span></button>
+            <?php foreach ($targetNames as $n): ?>
+            <button data-class="<?php echo $n; ?>"><?php echo $emojis[$n]; ?> <?php echo $n; ?> <span class="count"><?php echo $counts[$n]; ?></span></button>
+            <?php endforeach; ?>
+        </div>
+
+        <!-- 照片网格 -->
+        <div class="photo-gallery" id="photoGallery">
+            <?php foreach ($buckets as $class => $items): ?>
+                <?php foreach ($items as $item): ?>
+                <div class="photo-item"
+                     data-class="<?php echo $class; ?>"
+                     data-title="<?php echo htmlspecialchars($item['title']); ?>"
+                     data-loc="<?php echo htmlspecialchars($item['location']); ?>"
+                     data-date="<?php echo date('Y.m.d', $item['created']); ?>"
+                     data-img="<?php echo htmlspecialchars($item['img']); ?>">
+                    <?php if ($item['img']): ?>
+                    <img src="<?php echo htmlspecialchars($item['img']); ?>" alt="<?php echo htmlspecialchars($item['title']); ?>" loading="lazy" />
+                    <?php else: ?>
+                    <div style="width:100%;aspect-ratio:1;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:12px;">无图片</div>
+                    <?php endif; ?>
+                    <span class="class-badge"><?php echo $emojis[$class]; ?> <?php echo $class; ?></span>
+                    <div class="photo-caption">
+                        <div class="photo-caption-title"><?php echo htmlspecialchars($item['title']); ?></div>
+                        <?php if ($item['location']): ?>
+                        <div class="photo-caption-loc">📍 <?php echo htmlspecialchars($item['location']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            <?php endforeach; ?>
+        </div>
+
+        <?php else: ?>
+        <div class="photo-empty">
+            <p>暂无摄影作品</p>
+            <p>在「相册」分类下发布文章，填写 <strong>class</strong> 字段指定分类（风景/城市/人像/美食/动物）</p>
+        </div>
+        <?php endif; ?>
+
+    </div>
+</div>
+
+<!-- 灯箱 -->
+<div class="photo-modal" id="photoModal">
+    <button class="m-close" id="mClose">×</button>
+    <button class="m-nav m-prev" id="mPrev">‹</button>
+    <button class="m-nav m-next" id="mNext">›</button>
+    <img id="mImg" src="" alt="" />
+    <div class="m-info">
+        <h3 class="m-title" id="mTitle"></h3>
+        <p class="m-meta" id="mMeta"></p>
+    </div>
+</div>
+
+<script>
+(function(){
+    var visible = [];
+    var curIdx = 0;
+
+    function refresh(){
+        var cls = document.querySelector('.photo-filter button.active').dataset.class;
+        visible = [];
+        document.querySelectorAll('.photo-item').forEach(function(el){
+            el.style.display = (!cls || cls === '全部' || el.dataset.class === cls) ? '' : 'none';
+            if (el.style.display !== 'none') visible.push(el);
+        });
+    }
+
+    function showModal(item) {
+        curIdx = visible.indexOf(item);
+        document.getElementById('mImg').src = item.dataset.img;
+        document.getElementById('mTitle').textContent = item.dataset.title;
+        var loc = item.dataset.loc;
+        var date = item.dataset.date;
+        document.getElementById('mMeta').textContent = (loc ? '📍 ' + loc + ' · ' : '') + date;
+        document.getElementById('photoModal').classList.add('open');
+    }
+
+    document.getElementById('photoFilter').addEventListener('click', function(e){
+        var btn = e.target.closest('button[data-class]');
+        if (!btn) return;
+        document.querySelectorAll('.photo-filter button').forEach(function(b){ b.classList.remove('active'); });
+        btn.classList.add('active');
+        refresh();
+    });
+
+    document.getElementById('photoGallery').addEventListener('click', function(e){
+        var item = e.target.closest('.photo-item');
+        if (item) showModal(item);
+    });
+
+    document.getElementById('mClose').addEventListener('click', function(){
+        document.getElementById('photoModal').classList.remove('open');
+    });
+
+    document.getElementById('photoModal').addEventListener('click', function(e){
+        if (e.target === this) document.getElementById('photoModal').classList.remove('open');
+    });
+
+    document.getElementById('mPrev').addEventListener('click', function(e){
+        e.stopPropagation();
+        curIdx = (curIdx - 1 + visible.length) % visible.length;
+        showModal(visible[curIdx]);
+    });
+
+    document.getElementById('mNext').addEventListener('click', function(e){
+        e.stopPropagation();
+        curIdx = (curIdx + 1) % visible.length;
+        showModal(visible[curIdx]);
+    });
+
+    document.addEventListener('keydown', function(e){
+        if (!document.getElementById('photoModal').classList.contains('open')) return;
+        if (e.key === 'Escape') document.getElementById('mClose').click();
+        if (e.key === 'ArrowLeft') document.getElementById('mPrev').click();
+        if (e.key === 'ArrowRight') document.getElementById('mNext').click();
+    });
+
+    refresh();
+})();
+</script>
+
+<?php $this->need('footer.php'); ?>
